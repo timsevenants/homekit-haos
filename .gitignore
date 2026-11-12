@@ -1,0 +1,12 @@
+# Never publish data or secrets
+*.json
+*.p8
+*.p12
+*.pem
+*.key
+*.cer
+*.mobileprovision
+.env
+*.env
+secrets.yaml
+backups/

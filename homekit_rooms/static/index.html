@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HomeKit Rooms</title>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<style>
+:root {
+  --bg: #f5f6f8; --card: #fff; --text: #1c1d21; --muted: #6b7280; --line: #e3e5ea;
+  --accent: #03a9f4; --changed: #fff4d6; --changed-line: #f0b429; --danger: #d64545; --new: #e3f7e8;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111318; --card: #1c1f26; --text: #e8eaed; --muted: #9aa0a6; --line: #2c313b;
+    --changed: #3a3218; --changed-line: #c9962a; --new: #183323; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+header.top, .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 16px; }
+header.top { background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+.tools { padding-top: 6px; padding-bottom: 0; color: var(--muted); }
+.spacer { flex: 1; }
+select, input[type=text], input[type=search], button {
+  font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+}
+select { max-width: 100%; min-width: 0; }
+button { cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+label { display: inline-flex; gap: 6px; align-items: center; }
+#msg { padding: 0 16px; white-space: pre-line; }
+#msg.error { color: var(--danger); }
+#board { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; padding: 12px 16px 40px; align-items: start; }
+.room { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.room.changed > header { background: var(--changed); }
+.room.new > header { background: var(--new); }
+.room > header { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.room.fixed > header { color: var(--muted); }
+.handle { cursor: grab; color: var(--muted); user-select: none; touch-action: none; padding: 0 2px; }
+.rname { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.count { color: var(--muted); font-weight: 400; font-size: 12px; }
+.icon-btn { border: 0; background: none; padding: 2px 4px; color: var(--muted); }
+ul.items { list-style: none; margin: 0; padding: 6px; min-height: 44px; }
+ul.items li { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 8px; border: 1px solid transparent; cursor: grab; }
+ul.items li:hover { border-color: var(--line); }
+ul.items li.changed { background: var(--changed); border-color: var(--changed-line); }
+ul.items li.ro { cursor: default; opacity: .6; }
+ul.items li .body { flex: 1; min-width: 0; }
+ul.items li .name { overflow-wrap: anywhere; }
+ul.items li small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+ul.items li input, .room header input { width: 100%; }
+.sortable-ghost { opacity: .35; }
+.hidden-note { color: var(--muted); font-size: 12px; padding: 0 14px 8px; }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text); width: min(640px, calc(100vw - 32px)); }
+dialog ul { max-height: 50vh; overflow: auto; padding-left: 18px; }
+dialog li.add { color: #2e9e55; } dialog li.remove { color: var(--danger); }
+dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
+#log { white-space: pre-line; font-size: 12px; color: var(--muted); max-height: 30vh; overflow: auto; }
+@media (max-width: 600px) { #board { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header class="top">
+  <select id="source" aria-label="Bron"></select>
+  <button id="reload" title="Opnieuw laden">↻</button>
+  <span class="spacer"></span>
+  <input id="search" type="search" placeholder="Zoeken…">
+  <button id="addRoom">+ Ruimte</button>
+  <button id="save" class="primary" disabled>Opslaan</button>
+</header>
+<div class="tools">
+  <input id="find" type="text" placeholder="Zoek in namen">
+  <input id="replace" type="text" placeholder="Vervang door">
+  <button id="doReplace">Vervang in zichtbare namen</button>
+  <span class="spacer"></span>
+  <label id="haSyncLabel" title="Namen en ruimtes ook aanpassen bij entiteiten waarvan het serienummer een entity_id is"><input type="checkbox" id="haSync"> Ook in Home Assistant</label>
+  <label id="allLabel"><input type="checkbox" id="allDomains"> Alle entiteiten</label>
+</div>
+<p id="msg"></p>
+<main id="board"></main>
+
+<dialog id="dlg">
+  <h3 id="dlgTitle">Wijzigingen</h3>
+  <ul id="changes"></ul>
+  <div id="log"></div>
+  <div class="actions">
+    <button id="cancel">Sluiten</button>
+    <button id="confirm" class="primary">Opslaan</button>
+  </div>
+</dialog>
+
+<script>
+const NONE = '__none__';
+const DOMAINS = ['light', 'switch', 'cover', 'climate', 'fan', 'lock', 'alarm_control_panel', 'media_player', 'valve', 'vacuum', 'water_heater', 'humidifier'];
+const ICON = { light: '💡', switch: '🔌', cover: '🪟', climate: '🌡️', fan: '🌀', lock: '🔒', media_player: '🔊', sensor: '📈',
+  binary_sensor: '⚪', alarm_control_panel: '🚨', valve: '🚰', vacuum: '🧹', camera: '📷', scene: '🎬', script: '📜', automation: '⚙️' };
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const norm = s => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().split(/\s+/).filter(Boolean).join(' ');
+const isEntityId = s => /^[a-z0-9_]+\.[a-z0-9_]+$/.test(s || '');
+
+/** The board: rooms in order, items pointing at a room id. `orig*` holds what was loaded. */
+let S = null;
+let newRooms = 0;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  if (!r.ok) throw new Error(json?.error || text || r.statusText);
+  return json;
+}
+const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+function say(text, error = false) { $('msg').textContent = text; $('msg').className = error ? 'error' : ''; }
+
+async function loadSources(keep) {
+  let files = [];
+  try { files = await api('api/files'); } catch (e) { say('Bestanden in /share lezen mislukt: ' + e.message, true); }
+  $('source').innerHTML = '<option value="ha">Home Assistant: ruimtes en entiteiten</option>' +
+    files.map(f => `<option value="file:${esc(f.path)}">${esc(f.path)} (${f.kind === 'snapshot' ? 'export uit de app' : 'plan'}, ${esc(f.modified.replace('T', ' '))})</option>`).join('');
+  if (keep && [...$('source').options].some(o => o.value === keep)) $('source').value = keep;
+}
+
+function fixedRoom() { return { id: NONE, name: 'Zonder ruimte', orig: 'Zonder ruimte', fixed: true }; }
+
+async function loadHA() {
+  const d = await api('api/ha');
+  const rooms = [fixedRoom(), ...d.areas.map(a => ({ id: a.id, name: a.name, orig: a.name }))];
+  const items = d.entities.map(e => ({
+    id: e.entity_id, entity_id: e.entity_id, name: e.name, orig: e.name,
+    room: e.area_id || NONE, origRoom: e.area_id || NONE, editable: e.editable,
+    domain: e.entity_id.split('.')[0], sub: e.entity_id + (e.editable ? '' : ' · niet aanpasbaar (geen unique_id)'),
+  }));
+  S = { kind: 'ha', rooms, items, removed: [], origOrder: rooms.map(r => r.id), areas: d.areas };
+}
+
+async function loadFile(path) {
+  const raw = await api('api/file?path=' + encodeURIComponent(path));
+  const format = raw.format === 'homekit-rooms-snapshot' ? 'snapshot' : 'plan';
+  const names = [...raw.rooms];
+  for (const a of raw.accessories) if (a.room && !names.some(n => norm(n) === norm(a.room))) names.push(a.room);
+  const rooms = [fixedRoom(), ...names.map((n, i) => ({ id: 'r' + i, name: n, orig: n }))];
+  const roomId = n => (n && rooms.find(r => !r.fixed && norm(r.orig) === norm(n))?.id) || NONE;
+  const items = raw.accessories.map((a, i) => {
+    const entity = isEntityId(a.serial) ? a.serial : null;
+    return {
+      id: 'a' + i, idx: i, name: a.name, orig: a.name, room: roomId(a.room), origRoom: roomId(a.room), editable: true,
+      entity_id: entity, domain: entity ? entity.split('.')[0] : null,
+      sub: [a.serial, a.manufacturer, a.model].filter(Boolean).join(' · '),
+    };
+  });
+  S = { kind: 'file', path, format, raw, rooms, items, removed: [], origOrder: rooms.map(r => r.id) };
+}
+
+async function load() {
+  const v = $('source').value;
+  say('Laden…');
+  try {
+    if (v === 'ha') await loadHA(); else await loadFile(v.slice(5));
+    say(S.kind === 'ha'
+      ? 'Sleep entiteiten naar een andere ruimte, tik op ✎ om een naam te wijzigen. De volgorde van ruimtes wordt alleen in een JSON bewaard.'
+      : `Sleep accessoires naar een andere ruimte en ruimtes (⠿) in de gewenste volgorde. Opslaan schrijft ${S.path}, met een backup van de vorige versie.`);
+  } catch (e) {
+    S = null;
+    say('Laden mislukt: ' + e.message, true);
+  }
+  render();
+}
+
+const visible = it => (S.kind !== 'ha' || $('allDomains').checked || DOMAINS.includes(it.domain)) &&
+  (!$('search').value || norm(it.name + ' ' + it.sub).includes(norm($('search').value)));
+const roomById = id => S.rooms.find(r => r.id === id) || S.removed.find(r => r.id === id);
+
+function render() {
+  $('board').innerHTML = '';
+  $('haSyncLabel').style.display = S?.kind === 'file' ? '' : 'none';
+  $('allLabel').style.display = S?.kind === 'ha' ? '' : 'none';
+  $('addRoom').disabled = !S;
+  if (!S) { updateSave(); return; }
+
+  for (const r of S.rooms) {
+    const all = S.items.filter(i => i.room === r.id);
+    const shown = all.filter(visible);
+    const col = document.createElement('section');
+    col.className = 'room' + (r.fixed ? ' fixed' : '') + (r.isNew ? ' new' : r.name !== r.orig ? ' changed' : '');
+    col.dataset.room = r.id;
+    col.innerHTML = `<header>
+        ${r.fixed ? '' : '<span class="handle" title="Sleep om te sorteren">⠿</span>'}
+        <span class="rname">${esc(r.name)}</span>
+        <span class="count">${shown.length}${shown.length !== all.length ? '/' + all.length : ''}</span>
+        ${r.fixed ? '' : '<button class="icon-btn edit" title="Naam wijzigen">✎</button>'}
+        ${!r.fixed && all.length === 0 ? '<button class="icon-btn del" title="Ruimte verwijderen">✕</button>' : ''}
+      </header>
+      <ul class="items" data-room="${esc(r.id)}"></ul>`;
+    const ul = col.querySelector('ul');
+    for (const it of shown) {
+      const li = document.createElement('li');
+      li.dataset.id = it.id;
+      li.className = (it.editable ? '' : 'ro ') + (it.name !== it.orig || it.room !== it.origRoom ? 'changed' : '');
+      li.innerHTML = `<span>${ICON[it.domain] || '🔹'}</span>
+        <div class="body"><div class="name">${esc(it.name)}</div><small>${esc(it.sub)}${it.name !== it.orig ? ' · was: ' + esc(it.orig) : ''}</small></div>
+        ${it.editable ? '<button class="icon-btn edit" title="Naam wijzigen">✎</button>' : ''}`;
+      li.querySelector('.edit')?.addEventListener('click', () => editName(li.querySelector('.name'), it.name, v => { it.name = v; }));
+      ul.appendChild(li);
+    }
+    col.querySelector('header .edit')?.addEventListener('click', () => editName(col.querySelector('.rname'), r.name, v => { r.name = v; }));
+    col.querySelector('header .del')?.addEventListener('click', () => {
+      S.rooms = S.rooms.filter(x => x !== r);
+      if (!r.isNew) S.removed.push(r);
+      render();
+    });
+    $('board').appendChild(col);
+
+    new Sortable(ul, {
+      group: 'items', animation: 120, forceFallback: true, filter: '.ro, .edit, input', preventOnFilter: false,
+      delay: 150, delayOnTouchOnly: true,
+      onEnd: e => {
+        const it = S.items.find(i => i.id === e.item.dataset.id);
+        if (it && e.to.dataset.room) it.room = e.to.dataset.room;
+        setTimeout(render);
+      },
+    });
+  }
+  updateSave();
+}
+
+// Rooms: one Sortable on the board for the whole session (the room lists are rebuilt on every render).
+new Sortable($('board'), {
+  handle: '.handle', draggable: '.room:not(.fixed)', animation: 120, forceFallback: true,
+  onEnd: () => {
+    const order = [...$('board').children].map(c => c.dataset.room);
+    S.rooms.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+    setTimeout(render);
+  },
+});
+
+function editName(span, current, set) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = current;
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = commit => {
+    if (done) return;
+    done = true;
+    const v = input.value.trim();
+    if (commit && v) set(v);
+    render();
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); });
+  input.addEventListener('blur', () => finish(true));
+}
+
+/** Everything that differs from what was loaded, as [kind, text]. */
+function changes() {
+  if (!S) return [];
+  const out = [];
+  const name = id => roomById(id)?.name ?? 'Zonder ruimte';
+  const was = id => roomById(id)?.orig ?? 'Zonder ruimte';
+  for (const r of S.rooms) {
+    if (r.isNew) out.push(['add', `Nieuwe ruimte: ${r.name}`]);
+    else if (!r.fixed && r.name !== r.orig) out.push(['change', `Ruimte ${r.orig} → ${r.name}`]);
+  }
+  for (const r of S.removed) out.push(['remove', `Ruimte verwijderd: ${r.orig}`]);
+  if (S.kind === 'file') {
+    const now = S.rooms.filter(r => !r.isNew).map(r => r.id);
+    if (now.join() !== S.origOrder.filter(id => now.includes(id)).join()) out.push(['change', 'Andere volgorde van de ruimtes']);
+  }
+  for (const it of S.items) {
+    if (it.name !== it.orig) out.push(['change', `${it.orig} → ${it.name}`]);
+    if (it.room !== it.origRoom) out.push(['change', `${it.name}: ${was(it.origRoom)} → ${name(it.room)}`]);
+  }
+  return out;
+}
+
+function updateSave() {
+  const n = changes().length;
+  $('save').disabled = n === 0;
+  $('save').textContent = n ? `Opslaan (${n})` : 'Opslaan';
+}
+
+/** The loaded file with the board applied. */
+function buildFile() {
+  const raw = structuredClone(S.raw);
+  const roomName = id => (id === NONE ? '' : roomById(id).name);
+  const renamed = new Map(S.rooms.filter(r => !r.fixed && !r.isNew).map(r => [norm(r.orig), r.name]));
+  raw.rooms = S.rooms.filter(r => !r.fixed).map(r => r.name);
+  for (const it of S.items) {
+    const a = raw.accessories[it.idx];
+    // The Home app shows the service name: rename services that carried the old accessory name.
+    if (it.name !== it.orig) for (const s of a.services || []) if (s.name === it.orig) s.name = it.name;
+    a.name = it.name;
+    a.room = roomName(it.room);
+  }
+  if (S.format === 'snapshot') {
+    for (const z of raw.zones || []) {
+      z.rooms = z.rooms.map(n => renamed.get(norm(n)) ?? n).filter(n => raw.rooms.some(x => norm(x) === norm(n)));
+    }
+  } else {
+    // A plan has no "no room": leave those accessories out.
+    raw.accessories = raw.accessories.filter(a => a.room);
+  }
+  return raw;
+}
+
+/** Home Assistant changes: for HA itself, or for file accessories whose serial number is an entity_id. */
+function buildHA() {
+  const roomName = id => (id === NONE ? null : roomById(id).name);
+  const ops = { createAreas: [], renameAreas: [], deleteAreas: [], entities: [] };
+  if (S.kind === 'ha') {
+    ops.createAreas = S.rooms.filter(r => r.isNew).map(r => r.name);
+    ops.renameAreas = S.rooms.filter(r => !r.fixed && !r.isNew && r.name !== r.orig).map(r => ({ area_id: r.id, name: r.name }));
+    ops.deleteAreas = S.removed.map(r => r.id);
+  }
+  for (const it of S.items) {
+    if (!it.entity_id || (it.name === it.orig && it.room === it.origRoom)) continue;
+    const e = { entity_id: it.entity_id };
+    if (it.name !== it.orig) e.name = it.name;
+    if (it.room !== it.origRoom) {
+      e.area = roomName(it.room);
+      if (S.kind === 'file' && e.area && !ops.createAreas.includes(e.area)) ops.createAreas.push(e.area);
+    }
+    ops.entities.push(e);
+  }
+  return ops;
+}
+
+function openDialog() {
+  const list = changes();
+  $('dlgTitle').textContent = `${list.length} wijzigingen`;
+  $('changes').innerHTML = list.map(([k, t]) => `<li class="${k}">${esc(t)}</li>`).join('');
+  const where = S.kind === 'ha' ? 'Home Assistant' : S.path + ($('haSync').checked ? ' en Home Assistant' : '');
+  $('log').textContent = `Wordt opgeslagen in ${where}.`;
+  $('confirm').style.display = '';
+  $('confirm').disabled = false;
+  $('dlg').showModal();
+}
+
+async function confirmSave() {
+  $('confirm').disabled = true;
+  const log = [];
+  try {
+    if (S.kind === 'file') {
+      const r = await post('api/file', { path: S.path, data: buildFile() });
+      log.push(`💾 ${r.path} bewaard` + (r.backup ? `, vorige versie in ${r.backup}` : ''));
+    }
+    if (S.kind === 'ha' || $('haSync').checked) {
+      const ops = buildHA();
+      if (ops.entities.length || ops.createAreas.length || ops.renameAreas.length || ops.deleteAreas.length) {
+        const r = await post('api/ha/apply', ops);
+        log.push(...r.log);
+      }
+    }
+    log.push('Klaar.');
+  } catch (e) {
+    log.push('❌ ' + e.message);
+  }
+  $('log').textContent = log.join('\n');
+  $('confirm').style.display = 'none';
+  await load();
+}
+
+$('source').addEventListener('change', load);
+$('reload').addEventListener('click', async () => { await loadSources($('source').value); await load(); });
+$('search').addEventListener('input', render);
+$('allDomains').addEventListener('change', render);
+$('addRoom').addEventListener('click', () => {
+  const r = { id: 'new' + (++newRooms), name: 'Nieuwe ruimte ' + newRooms, orig: null, isNew: true };
+  S.rooms.push(r);
+  render();
+  const col = [...$('board').children].find(c => c.dataset.room === r.id);
+  col?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  col?.querySelector('header .edit')?.click();
+});
+$('doReplace').addEventListener('click', () => {
+  const find = $('find').value;
+  if (!S || !find) return;
+  const re = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  let n = 0;
+  for (const it of S.items.filter(i => i.editable && visible(i))) {
+    const v = it.name.replace(re, $('replace').value).replace(/\s+/g, ' ').trim();
+    if (v && v !== it.name) { it.name = v; n++; }
+  }
+  say(`${n} namen aangepast (nog niet opgeslagen).`);
+  render();
+});
+$('save').addEventListener('click', openDialog);
+$('confirm').addEventListener('click', confirmSave);
+$('cancel').addEventListener('click', () => $('dlg').close());
+
+loadSources().then(load);
+</script>
+</body>
+</html>
