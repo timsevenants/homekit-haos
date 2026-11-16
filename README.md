@@ -4,11 +4,13 @@ Home Assistant add-on repository.
 
 ## HomeKit Rooms
 
-A page in the Home Assistant sidebar for sorting rooms and renaming things:
+A page in the Home Assistant sidebar for managing exports of the HomeKit Rooms iOS app:
 
-- Open an export from the HomeKit Rooms iOS app and drag accessories to another room.
-- Rename lights and other devices, inline or with find and replace.
+- Import and export the JSON. Every change keeps a version, so you can compare and restore.
+- Drag accessories to another room and rename them, inline or with find and replace.
+- Add Home Assistant entities to the file, and choose which entities the HomeKit Bridge exposes.
 - Do the same with Home Assistant's own areas and entities.
+- Agents can do all of this through a JSON API with dry runs. See [AGENTS.md](AGENTS.md).
 
 See [homekit_rooms/DOCS.md](homekit_rooms/DOCS.md) (in Dutch).
 

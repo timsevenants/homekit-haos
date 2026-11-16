@@ -1,7 +1,7 @@
 name: HomeKit Rooms
-version: "0.2.0"
+version: "0.3.0"
 slug: homekit_rooms
-description: Ruimtes sorteren en namen wijzigen, in Home Assistant en in de JSON van de HomeKit Rooms-app
+description: JSON van de HomeKit Rooms-app beheren (sorteren, hernoemen, versies) en kiezen wat de HomeKit Bridge toont
 url: https://github.com/timsevenants/homekit-haos
 arch:
   - aarch64
@@ -16,3 +16,11 @@ homeassistant_api: true
 map:
   - type: share
     read_only: false
+ports:
+  8099/tcp: null
+ports_description:
+  8099/tcp: API voor agents (alleen met api_token; leeg = uit)
+options:
+  api_token: ""
+schema:
+  api_token: password?

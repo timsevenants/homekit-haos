@@ -55,6 +55,21 @@ dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--c
 dialog ul { max-height: 50vh; overflow: auto; padding-left: 18px; }
 dialog li.add { color: #2e9e55; } dialog li.remove { color: var(--danger); }
 dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
+.hk { font-size: 11px; border-radius: 999px; padding: 1px 7px; border: 1px solid var(--line); background: none; color: var(--muted); white-space: nowrap; }
+.hk.on { background: #e8f5ff; border-color: var(--accent); color: #0277bd; }
+.hk.changed { outline: 2px solid var(--changed-line); }
+@media (prefers-color-scheme: dark) { .hk.on { background: #0d3550; color: #8fd3ff; } }
+ul.items li.removed { text-decoration: line-through; opacity: .5; }
+ul.items li.added { background: var(--new); }
+.pick { max-height: 45vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; }
+.pick label { display: flex; padding: 6px 8px; border-bottom: 1px solid var(--line); align-items: flex-start; }
+.pick small, .vers small { color: var(--muted); display: block; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.row input[type=text], .row input[type=search] { flex: 1; min-width: 160px; }
+.vers { list-style: none; padding: 0 !important; }
+.vers li { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.vers .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.vers .acts a { font-size: 13px; align-self: center; color: var(--accent); }
 #log { white-space: pre-line; font-size: 12px; color: var(--muted); max-height: 30vh; overflow: auto; }
 @media (max-width: 600px) { #board { grid-template-columns: 1fr; } }
 </style>
@@ -63,9 +78,14 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
 <header class="top">
   <select id="source" aria-label="Bron"></select>
   <button id="reload" title="Opnieuw laden">↻</button>
+  <button id="importBtn" title="Een JSON-export uploaden naar /share/homekit-rooms">Importeren</button>
+  <input id="importFile" type="file" accept=".json,application/json" hidden>
+  <button id="exportBtn" title="Dit bestand (met de wijzigingen) downloaden">Exporteren</button>
+  <button id="versionsBtn" title="Vorige versies van dit bestand">Versies</button>
   <span class="spacer"></span>
   <input id="search" type="search" placeholder="Zoeken…">
   <button id="addRoom">+ Ruimte</button>
+  <button id="addEntity" title="Entiteiten uit Home Assistant toevoegen aan dit bestand">+ Entiteit</button>
   <button id="save" class="primary" disabled>Opslaan</button>
 </header>
 <div class="tools">
@@ -74,6 +94,7 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
   <button id="doReplace">Vervang in zichtbare namen</button>
   <span class="spacer"></span>
   <label id="haSyncLabel" title="Namen en ruimtes ook aanpassen bij entiteiten waarvan het serienummer een entity_id is"><input type="checkbox" id="haSync"> Ook in Home Assistant</label>
+  <select id="bridge" aria-label="HomeKit-bridge" title="Welke HomeKit-bridge van Home Assistant"></select>
   <label id="allLabel"><input type="checkbox" id="allDomains"> Alle entiteiten</label>
 </div>
 <p id="msg"></p>
@@ -82,11 +103,39 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
 <dialog id="dlg">
   <h3 id="dlgTitle">Wijzigingen</h3>
   <ul id="changes"></ul>
+  <div class="row" id="noteRow"><input id="note" type="text" placeholder="Notitie bij deze versie (optioneel)"></div>
   <div id="log"></div>
   <div class="actions">
     <button id="cancel">Sluiten</button>
     <button id="confirm" class="primary">Opslaan</button>
   </div>
+</dialog>
+
+<dialog id="addDlg">
+  <h3>Entiteiten toevoegen</h3>
+  <div class="row">
+    <input id="addSearch" type="search" placeholder="Zoek op naam, entity_id of gebied">
+    <label><input type="checkbox" id="addAll"> Alle domeinen</label>
+  </div>
+  <div class="pick" id="addList"></div>
+  <div class="row">
+    <label>Ruimte <select id="addRoomSel"></select></label>
+    <label><input type="checkbox" id="addExpose" checked> Zichtbaar maken in HomeKit</label>
+  </div>
+  <div class="actions">
+    <button id="addCancel">Annuleren</button>
+    <button id="addOk" class="primary">Toevoegen</button>
+  </div>
+</dialog>
+
+<dialog id="verDlg">
+  <h3 id="verTitle">Versies</h3>
+  <div class="row">
+    <input id="verNote" type="text" placeholder="Notitie">
+    <button id="verSave">Huidige versie bewaren</button>
+  </div>
+  <ul class="vers" id="verList"></ul>
+  <div class="actions"><button id="verClose">Sluiten</button></div>
 </dialog>
 
 <script>
@@ -101,14 +150,17 @@ const isEntityId = s => /^[a-z0-9_]+\.[a-z0-9_]+$/.test(s || '');
 
 /** The board: rooms in order, items pointing at a room id. `orig*` holds what was loaded. */
 let S = null;
-let newRooms = 0;
+let newRooms = 0, newItems = 0;
+/** HomeKit bridges of Home Assistant ({bridges, error?}). */
+let HK = null;
+let HA_CACHE = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
   const text = await r.text();
   let json = null;
   try { json = JSON.parse(text); } catch {}
-  if (!r.ok) throw new Error(json?.error || text || r.statusText);
+  if (!r.ok) { const e = new Error(json?.error || text || r.statusText); e.status = r.status; e.json = json; throw e; }
   return json;
 }
 const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -119,19 +171,49 @@ async function loadSources(keep) {
   let files = [];
   try { files = await api('api/files'); } catch (e) { say('Bestanden in /share lezen mislukt: ' + e.message, true); }
   $('source').innerHTML = '<option value="ha">Home Assistant: ruimtes en entiteiten</option>' +
-    files.map(f => `<option value="file:${esc(f.path)}">${esc(f.path)} (${f.kind === 'snapshot' ? 'export uit de app' : 'plan'}, ${esc(f.modified.replace('T', ' '))})</option>`).join('');
+    files.map(f => `<option value="file:${esc(f.path)}">${esc(f.path)} (${f.kind === 'snapshot' ? 'export uit de app' : 'plan'}, ${esc(f.modified.replace('T', ' '))}${f.versions ? ', ' + f.versions + ' versies' : ''})</option>`).join('');
   if (keep && [...$('source').options].some(o => o.value === keep)) $('source').value = keep;
+  else if (!keep && files.length) $('source').value = 'file:' + files[0].path;
 }
+
+async function haData() {
+  if (!HA_CACHE) HA_CACHE = await api('api/ha');
+  return HA_CACHE;
+}
+
+async function loadHomeKit() {
+  const keep = $('bridge').value;
+  try {
+    HK = await api('api/homekit');
+  } catch (e) {
+    HK = { bridges: [], error: e.message };
+  }
+  const opts = HK.bridges.filter(b => b.mode);
+  $('bridge').innerHTML = opts.length
+    ? opts.map(b => `<option value="${esc(b.entry_id)}">HomeKit: ${esc(b.title)} (${Object.keys(b.exposed).length} zichtbaar${b.editable ? '' : ', alleen lezen'})</option>`).join('')
+    : `<option value="">HomeKit-bridge: ${HK.error ? 'niet bereikbaar' : 'geen gevonden'}</option>`;
+  const pick = opts.find(b => b.entry_id === keep) || opts.find(b => b.editable) || opts[0];
+  if (pick) $('bridge').value = pick.entry_id;
+}
+
+const bridge = () => HK?.bridges.find(b => b.entry_id === $('bridge').value) || null;
+const exposedHow = eid => bridge()?.exposed[eid] || null;
 
 function fixedRoom() { return { id: NONE, name: 'Zonder ruimte', orig: 'Zonder ruimte', fixed: true }; }
 
+function withExposure(it) {
+  if (it.entity_id) { it.origExpose = !!exposedHow(it.entity_id); it.expose = it.origExpose; }
+  return it;
+}
+
 async function loadHA() {
-  const d = await api('api/ha');
+  HA_CACHE = null;
+  const d = await haData();
   const rooms = [fixedRoom(), ...d.areas.map(a => ({ id: a.id, name: a.name, orig: a.name }))];
-  const items = d.entities.map(e => ({
+  const items = d.entities.map(e => withExposure({
     id: e.entity_id, entity_id: e.entity_id, name: e.name, orig: e.name,
-    room: e.area_id || NONE, origRoom: e.area_id || NONE, editable: e.editable,
-    domain: e.entity_id.split('.')[0], sub: e.entity_id + (e.editable ? '' : ' · niet aanpasbaar (geen unique_id)'),
+    room: e.area_id || NONE, origRoom: e.area_id || NONE, editable: e.editable, listed: e.listed,
+    domain: e.domain, sub: e.entity_id + (e.editable ? '' : ' · niet aanpasbaar (geen unique_id)'),
   }));
   S = { kind: 'ha', rooms, items, removed: [], origOrder: rooms.map(r => r.id), areas: d.areas };
 }
@@ -145,11 +227,11 @@ async function loadFile(path) {
   const roomId = n => (n && rooms.find(r => !r.fixed && norm(r.orig) === norm(n))?.id) || NONE;
   const items = raw.accessories.map((a, i) => {
     const entity = isEntityId(a.serial) ? a.serial : null;
-    return {
+    return withExposure({
       id: 'a' + i, idx: i, name: a.name, orig: a.name, room: roomId(a.room), origRoom: roomId(a.room), editable: true,
-      entity_id: entity, domain: entity ? entity.split('.')[0] : null,
+      entity_id: entity, domain: entity ? entity.split('.')[0] : null, listed: true,
       sub: [a.serial, a.manufacturer, a.model].filter(Boolean).join(' · '),
-    };
+    });
   });
   S = { kind: 'file', path, format, raw, rooms, items, removed: [], origOrder: rooms.map(r => r.id) };
 }
@@ -158,10 +240,12 @@ async function load() {
   const v = $('source').value;
   say('Laden…');
   try {
+    await loadHomeKit();
     if (v === 'ha') await loadHA(); else await loadFile(v.slice(5));
-    say(S.kind === 'ha'
-      ? 'Sleep entiteiten naar een andere ruimte, tik op ✎ om een naam te wijzigen. De volgorde van ruimtes wordt alleen in een JSON bewaard.'
-      : `Sleep accessoires naar een andere ruimte en ruimtes (⠿) in de gewenste volgorde. Opslaan schrijft ${S.path}, met een backup van de vorige versie.`);
+    say((S.kind === 'ha'
+      ? 'Sleep entiteiten naar een andere ruimte, tik op ✎ om een naam te wijzigen en op HomeKit om ze te tonen of te verbergen in Apple Woning.'
+      : `Sleep accessoires naar een andere ruimte en ruimtes (⠿) in de gewenste volgorde. Opslaan schrijft ${S.path} en bewaart eerst een versie.`)
+      + (HK?.error ? `\nHomeKit-bridge niet gelezen: ${HK.error}` : ''));
   } catch (e) {
     S = null;
     say('Laden mislukt: ' + e.message, true);
@@ -169,15 +253,30 @@ async function load() {
   render();
 }
 
-const visible = it => (S.kind !== 'ha' || $('allDomains').checked || DOMAINS.includes(it.domain)) &&
+const visible = it => (S.kind !== 'ha' || $('allDomains').checked || (it.listed && DOMAINS.includes(it.domain))) &&
   (!$('search').value || norm(it.name + ' ' + it.sub).includes(norm($('search').value)));
 const roomById = id => S.rooms.find(r => r.id === id) || S.removed.find(r => r.id === id);
+const itemChanged = it => it.name !== it.orig || it.room !== it.origRoom;
+
+function hkButton(it) {
+  const b = bridge();
+  if (!it.entity_id || !b) return '';
+  const how = exposedHow(it.entity_id);
+  const title = !b.editable ? `Alleen lezen: ${b.reason || ''}`
+    : it.expose === it.origExpose && how === 'domain' ? 'Zichtbaar omdat het hele domein in de bridge zit. Tik om te verbergen.'
+    : it.expose ? 'Zichtbaar in HomeKit. Tik om te verbergen.' : 'Niet zichtbaar in HomeKit. Tik om te tonen.';
+  return `<button class="hk${it.expose ? ' on' : ''}${it.expose !== it.origExpose ? ' changed' : ''}" title="${esc(title)}" ${b.editable ? '' : 'disabled'}>HomeKit${it.expose ? ' ✓' : ''}</button>`;
+}
 
 function render() {
   $('board').innerHTML = '';
-  $('haSyncLabel').style.display = S?.kind === 'file' ? '' : 'none';
+  const file = S?.kind === 'file';
+  $('haSyncLabel').style.display = file ? '' : 'none';
   $('allLabel').style.display = S?.kind === 'ha' ? '' : 'none';
   $('addRoom').disabled = !S;
+  $('addEntity').style.display = file ? '' : 'none';
+  $('exportBtn').disabled = !file;
+  $('versionsBtn').disabled = !file;
   if (!S) { updateSave(); return; }
 
   for (const r of S.rooms) {
@@ -191,30 +290,38 @@ function render() {
         <span class="rname">${esc(r.name)}</span>
         <span class="count">${shown.length}${shown.length !== all.length ? '/' + all.length : ''}</span>
         ${r.fixed ? '' : '<button class="icon-btn edit" title="Naam wijzigen">✎</button>'}
-        ${!r.fixed && all.length === 0 ? '<button class="icon-btn del" title="Ruimte verwijderen">✕</button>' : ''}
+        ${!r.fixed && all.filter(i => !i.removed).length === 0 ? '<button class="icon-btn del" title="Ruimte verwijderen">✕</button>' : ''}
       </header>
       <ul class="items" data-room="${esc(r.id)}"></ul>`;
     const ul = col.querySelector('ul');
     for (const it of shown) {
       const li = document.createElement('li');
       li.dataset.id = it.id;
-      li.className = (it.editable ? '' : 'ro ') + (it.name !== it.orig || it.room !== it.origRoom ? 'changed' : '');
+      li.className = [it.editable ? '' : 'ro', itemChanged(it) && !it.isNew ? 'changed' : '', it.isNew ? 'added' : '', it.removed ? 'removed' : ''].join(' ');
       li.innerHTML = `<span>${ICON[it.domain] || '🔹'}</span>
-        <div class="body"><div class="name">${esc(it.name)}</div><small>${esc(it.sub)}${it.name !== it.orig ? ' · was: ' + esc(it.orig) : ''}</small></div>
-        ${it.editable ? '<button class="icon-btn edit" title="Naam wijzigen">✎</button>' : ''}`;
+        <div class="body"><div class="name">${esc(it.name)}</div><small>${esc(it.sub)}${it.name !== it.orig && !it.isNew ? ' · was: ' + esc(it.orig) : ''}</small></div>
+        ${hkButton(it)}
+        ${it.editable && !it.removed ? '<button class="icon-btn edit" title="Naam wijzigen">✎</button>' : ''}
+        ${file ? `<button class="icon-btn rm" title="${it.removed ? 'Terugzetten' : 'Uit dit bestand verwijderen'}">${it.removed ? '↺' : '✕'}</button>` : ''}`;
       li.querySelector('.edit')?.addEventListener('click', () => editName(li.querySelector('.name'), it.name, v => { it.name = v; }));
+      li.querySelector('.hk')?.addEventListener('click', () => { it.expose = !it.expose; render(); });
+      li.querySelector('.rm')?.addEventListener('click', () => {
+        if (it.isNew) S.items = S.items.filter(x => x !== it); else it.removed = !it.removed;
+        render();
+      });
       ul.appendChild(li);
     }
     col.querySelector('header .edit')?.addEventListener('click', () => editName(col.querySelector('.rname'), r.name, v => { r.name = v; }));
     col.querySelector('header .del')?.addEventListener('click', () => {
       S.rooms = S.rooms.filter(x => x !== r);
       if (!r.isNew) S.removed.push(r);
+      for (const it of S.items) if (it.room === r.id) it.room = NONE;
       render();
     });
     $('board').appendChild(col);
 
     new Sortable(ul, {
-      group: 'items', animation: 120, forceFallback: true, filter: '.ro, .edit, input', preventOnFilter: false,
+      group: 'items', animation: 120, forceFallback: true, filter: '.ro, .edit, .hk, .rm, input', preventOnFilter: false,
       delay: 150, delayOnTouchOnly: true,
       onEnd: e => {
         const it = S.items.find(i => i.id === e.item.dataset.id);
@@ -271,8 +378,15 @@ function changes() {
     if (now.join() !== S.origOrder.filter(id => now.includes(id)).join()) out.push(['change', 'Andere volgorde van de ruimtes']);
   }
   for (const it of S.items) {
-    if (it.name !== it.orig) out.push(['change', `${it.orig} → ${it.name}`]);
-    if (it.room !== it.origRoom) out.push(['change', `${it.name}: ${was(it.origRoom)} → ${name(it.room)}`]);
+    if (it.isNew) out.push(['add', `Accessoire ${it.name} (${it.entity_id}) in ${name(it.room)}`]);
+    else if (it.removed) out.push(['remove', `Accessoire uit het bestand: ${it.orig}`]);
+    else {
+      if (it.name !== it.orig) out.push(['change', `${it.orig} → ${it.name}`]);
+      if (it.room !== it.origRoom) out.push(['change', `${it.name}: ${was(it.origRoom)} → ${name(it.room)}`]);
+    }
+    if (it.entity_id && it.expose !== it.origExpose) {
+      out.push([it.expose ? 'add' : 'remove', `${it.expose ? 'Zichtbaar in HomeKit' : 'Niet meer in HomeKit'}: ${it.name} (${it.entity_id})`]);
+    }
   }
   return out;
 }
@@ -289,13 +403,24 @@ function buildFile() {
   const roomName = id => (id === NONE ? '' : roomById(id).name);
   const renamed = new Map(S.rooms.filter(r => !r.fixed && !r.isNew).map(r => [norm(r.orig), r.name]));
   raw.rooms = S.rooms.filter(r => !r.fixed).map(r => r.name);
+  const accessories = [];
   for (const it of S.items) {
+    if (it.removed) continue;
+    if (it.isNew) {
+      const room = roomName(it.room);
+      accessories.push(S.format === 'snapshot'
+        ? { key: 'serial:' + it.entity_id, name: it.name, room, serial: it.entity_id, manufacturer: 'Home Assistant', model: it.domain, services: [] }
+        : { name: it.name, room, serial: it.entity_id });
+      continue;
+    }
     const a = raw.accessories[it.idx];
     // The Home app shows the service name: rename services that carried the old accessory name.
     if (it.name !== it.orig) for (const s of a.services || []) if (s.name === it.orig) s.name = it.name;
     a.name = it.name;
     a.room = roomName(it.room);
+    accessories.push(a);
   }
+  raw.accessories = accessories;
   if (S.format === 'snapshot') {
     for (const z of raw.zones || []) {
       z.rooms = z.rooms.map(n => renamed.get(norm(n)) ?? n).filter(n => raw.rooms.some(x => norm(x) === norm(n)));
@@ -317,7 +442,7 @@ function buildHA() {
     ops.deleteAreas = S.removed.map(r => r.id);
   }
   for (const it of S.items) {
-    if (!it.entity_id || (it.name === it.orig && it.room === it.origRoom)) continue;
+    if (!it.entity_id || it.isNew || it.removed || !itemChanged(it)) continue;
     const e = { entity_id: it.entity_id };
     if (it.name !== it.orig) e.name = it.name;
     if (it.room !== it.origRoom) {
@@ -329,12 +454,21 @@ function buildHA() {
   return ops;
 }
 
+function buildHomeKit() {
+  const changed = S.items.filter(it => it.entity_id && it.expose !== it.origExpose);
+  return { bridge: $('bridge').value, expose: changed.filter(i => i.expose).map(i => i.entity_id), hide: changed.filter(i => !i.expose).map(i => i.entity_id) };
+}
+
 function openDialog() {
   const list = changes();
   $('dlgTitle').textContent = `${list.length} wijzigingen`;
   $('changes').innerHTML = list.map(([k, t]) => `<li class="${k}">${esc(t)}</li>`).join('');
-  const where = S.kind === 'ha' ? 'Home Assistant' : S.path + ($('haSync').checked ? ' en Home Assistant' : '');
-  $('log').textContent = `Wordt opgeslagen in ${where}.`;
+  const hk = buildHomeKit();
+  const where = [S.kind === 'ha' ? 'Home Assistant' : S.path, S.kind === 'file' && $('haSync').checked ? 'Home Assistant' : null,
+    hk.expose.length || hk.hide.length ? `HomeKit-bridge ${bridge()?.title} (wordt herstart)` : null].filter(Boolean);
+  $('log').textContent = `Wordt opgeslagen in ${where.join(' en ')}.`;
+  $('noteRow').style.display = S.kind === 'file' ? '' : 'none';
+  $('note').value = '';
   $('confirm').style.display = '';
   $('confirm').disabled = false;
   $('dlg').showModal();
@@ -343,10 +477,11 @@ function openDialog() {
 async function confirmSave() {
   $('confirm').disabled = true;
   const log = [];
+  const keep = $('source').value;
   try {
     if (S.kind === 'file') {
-      const r = await post('api/file', { path: S.path, data: buildFile() });
-      log.push(`💾 ${r.path} bewaard` + (r.backup ? `, vorige versie in ${r.backup}` : ''));
+      const r = await post('api/file', { path: S.path, data: buildFile(), note: $('note').value });
+      log.push(`💾 ${r.path} bewaard` + (r.version ? `, vorige versie: ${r.version}` : ''));
     }
     if (S.kind === 'ha' || $('haSync').checked) {
       const ops = buildHA();
@@ -355,17 +490,191 @@ async function confirmSave() {
         log.push(...r.log);
       }
     }
+    const hk = buildHomeKit();
+    if (hk.expose.length || hk.hide.length) {
+      const r = await post('api/homekit/apply', hk);
+      log.push(...r.changes.map(c => (c[0] === 'add' ? '🏠 ' : '🚫 ') + c[1]), ...r.warnings.map(w => '⚠️ ' + w));
+      log.push(r.applied ? `HomeKit-bridge ${r.bridge} bewaard en herstart (${r.exposed_count} accessoires).` : 'HomeKit-bridge ongewijzigd.');
+    }
     log.push('Klaar.');
   } catch (e) {
     log.push('❌ ' + e.message);
   }
   $('log').textContent = log.join('\n');
   $('confirm').style.display = 'none';
+  HA_CACHE = null;
+  await loadSources(keep);
   await load();
 }
 
+// ---------- import / export ----------
+
+$('importBtn').addEventListener('click', () => $('importFile').click());
+$('importFile').addEventListener('change', async () => {
+  const f = $('importFile').files[0];
+  $('importFile').value = '';
+  if (!f) return;
+  let data;
+  try { data = JSON.parse(await f.text()); } catch { say(`${f.name} is geen geldige JSON.`, true); return; }
+  try {
+    let r;
+    try {
+      r = await post('api/import', { name: f.name, data });
+    } catch (e) {
+      if (e.status !== 409) throw e;
+      if (!confirm(`${e.json.path} bestaat al. Overschrijven? De huidige inhoud blijft als versie bewaard.`)) return;
+      r = await post('api/import', { name: f.name, data, overwrite: true });
+    }
+    await loadSources('file:' + r.path);
+    await load();
+    say(`${f.name} geïmporteerd als ${r.path}` + (r.version ? ` (vorige inhoud bewaard als versie ${r.version})` : '') + '.');
+  } catch (e) {
+    say('Importeren mislukt: ' + e.message, true);
+  }
+});
+
+$('exportBtn').addEventListener('click', () => {
+  if (S?.kind !== 'file') return;
+  const blob = new Blob([JSON.stringify(buildFile(), null, 2) + '\n'], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = S.path.split('/').pop();
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  if (changes().length) say('Geëxporteerd, inclusief de wijzigingen die nog niet opgeslagen zijn.');
+});
+
+// ---------- versions ----------
+
+async function showVersions() {
+  const path = S.path;
+  $('verTitle').textContent = `Versies van ${path}`;
+  $('verList').innerHTML = '<li>Laden…</li>';
+  if (!$('verDlg').open) $('verDlg').showModal();
+  let list;
+  try { list = await api('api/versions?path=' + encodeURIComponent(path)); } catch (e) { $('verList').innerHTML = `<li>${esc(e.message)}</li>`; return; }
+  if (!list.length) { $('verList').innerHTML = '<li>Nog geen versies. Bij elke keer opslaan, importeren of terugzetten wordt de vorige inhoud hier bewaard.</li>'; return; }
+  const q = id => `path=${encodeURIComponent(path)}&id=${encodeURIComponent(id)}`;
+  $('verList').innerHTML = list.map(v => `<li data-id="${esc(v.id)}">
+      <b>${esc(v.id.replace(/^(\d{4}-\d\d-\d\d) (\d\d)(\d\d)(\d\d)/, '$1 $2:$3:$4'))}</b> · ${esc(v.reason || '')}${v.note ? ' · <i>' + esc(v.note) + '</i>' : ''}
+      <small>${v.rooms ?? '?'} ruimtes, ${v.accessories ?? '?'} accessoires, ${v.scenes ?? 0} scènes, ${v.automations ?? 0} automatisaties</small>
+      <div class="acts">
+        <button class="cmp">Verschil met nu</button>
+        <button class="restore">Terugzetten</button>
+        <a href="api/version?${q(v.id)}&download=1" download>Download</a>
+        <button class="icon-btn vdel" title="Versie verwijderen">✕</button>
+      </div>
+      <ul class="diff"></ul>
+    </li>`).join('');
+  for (const li of $('verList').children) {
+    const id = li.dataset.id;
+    li.querySelector('.cmp').addEventListener('click', async () => {
+      const d = await api(`api/version?${q(id)}&compare=1`);
+      li.querySelector('.diff').innerHTML = d.changes.length
+        ? d.changes.map(([k, t]) => `<li class="${k}">${esc(t)}</li>`).join('') : '<li>Geen verschil met het huidige bestand.</li>';
+    });
+    li.querySelector('.restore').addEventListener('click', async () => {
+      if (!confirm(`Versie ${id} terugzetten? De huidige inhoud wordt eerst als versie bewaard.`)) return;
+      await post('api/versions/restore', { path, id });
+      $('verDlg').close();
+      await loadSources('file:' + path);
+      await load();
+      say(`Versie ${id} teruggezet.`);
+    });
+    li.querySelector('.vdel').addEventListener('click', async () => {
+      if (!confirm(`Versie ${id} definitief verwijderen?`)) return;
+      await post('api/versions/delete', { path, id });
+      showVersions();
+    });
+  }
+}
+$('versionsBtn').addEventListener('click', () => { if (S?.kind === 'file') showVersions(); });
+$('verSave').addEventListener('click', async () => {
+  await post('api/versions', { path: S.path, note: $('verNote').value });
+  $('verNote').value = '';
+  showVersions();
+});
+$('verClose').addEventListener('click', () => $('verDlg').close());
+
+// ---------- add entities ----------
+
+let addPicked = new Set();
+async function openAdd() {
+  addPicked = new Set();
+  $('addSearch').value = '';
+  $('addList').innerHTML = '<label>Laden…</label>';
+  $('addRoomSel').innerHTML = '<option value="__area__">Gebied uit Home Assistant</option>' +
+    S.rooms.map(r => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('');
+  $('addExpose').disabled = !bridge()?.editable;
+  $('addExpose').checked = !!bridge()?.editable;
+  $('addDlg').showModal();
+  try { await haData(); renderAdd(); } catch (e) { $('addList').innerHTML = `<label>${esc(e.message)}</label>`; }
+}
+
+function renderAdd() {
+  if (!HA_CACHE) return;
+  const inFile = new Set(S.items.filter(i => i.entity_id && !i.removed).map(i => i.entity_id));
+  const q = norm($('addSearch').value);
+  const list = HA_CACHE.entities
+    .filter(e => !inFile.has(e.entity_id))
+    .filter(e => $('addAll').checked || (e.listed && DOMAINS.includes(e.domain)))
+    .filter(e => !q || norm(`${e.name} ${e.entity_id} ${e.area || ''}`).includes(q))
+    .sort((a, b) => (a.area || '~').localeCompare(b.area || '~') || a.name.localeCompare(b.name))
+    .slice(0, 300);
+  $('addList').innerHTML = list.length ? list.map(e => {
+    const how = exposedHow(e.entity_id);
+    return `<label><input type="checkbox" value="${esc(e.entity_id)}" ${addPicked.has(e.entity_id) ? 'checked' : ''}>
+      <span>${ICON[e.domain] || '🔹'} ${esc(e.name)}<small>${esc(e.entity_id)}${e.area ? ' · ' + esc(e.area) : ''} · ${how ? 'al in HomeKit' : 'niet in HomeKit'}</small></span></label>`;
+  }).join('') : '<label>Niets gevonden.</label>';
+  for (const cb of $('addList').querySelectorAll('input')) {
+    cb.addEventListener('change', () => { cb.checked ? addPicked.add(cb.value) : addPicked.delete(cb.value); $('addOk').textContent = `Toevoegen (${addPicked.size})`; });
+  }
+  $('addOk').textContent = `Toevoegen (${addPicked.size})`;
+}
+
+function addEntities() {
+  const target = $('addRoomSel').value;
+  for (const eid of addPicked) {
+    const e = HA_CACHE.entities.find(x => x.entity_id === eid);
+    if (!e) continue;
+    let room = target;
+    if (target === '__area__') {
+      room = NONE;
+      if (e.area) {
+        let r = S.rooms.find(x => !x.fixed && norm(x.name) === norm(e.area));
+        if (!r) { r = { id: 'new' + (++newRooms), name: e.area, orig: null, isNew: true }; S.rooms.push(r); }
+        room = r.id;
+      }
+    }
+    const it = {
+      id: 'n' + (++newItems), isNew: true, name: e.name, orig: e.name, room, origRoom: room, editable: true,
+      entity_id: eid, domain: e.domain, listed: true, sub: eid + ' · nieuw',
+    };
+    it.origExpose = !!exposedHow(eid);
+    it.expose = it.origExpose || $('addExpose').checked;
+    S.items.push(it);
+  }
+  $('addDlg').close();
+  say(`${addPicked.size} entiteiten toegevoegd (nog niet opgeslagen). Na opslaan importeer je het bestand in de iOS-app.`);
+  render();
+}
+
+$('addEntity').addEventListener('click', () => { if (S?.kind === 'file') openAdd(); });
+$('addSearch').addEventListener('input', renderAdd);
+$('addAll').addEventListener('change', renderAdd);
+$('addOk').addEventListener('click', addEntities);
+$('addCancel').addEventListener('click', () => $('addDlg').close());
+
+// ---------- the rest ----------
+
 $('source').addEventListener('change', load);
-$('reload').addEventListener('click', async () => { await loadSources($('source').value); await load(); });
+$('bridge').addEventListener('change', () => {
+  if (S) for (const it of S.items) withExposure(it);
+  render();
+});
+$('reload').addEventListener('click', async () => { HA_CACHE = null; await loadSources($('source').value); await load(); });
 $('search').addEventListener('input', render);
 $('allDomains').addEventListener('change', render);
 $('addRoom').addEventListener('click', () => {
@@ -381,7 +690,7 @@ $('doReplace').addEventListener('click', () => {
   if (!S || !find) return;
   const re = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
   let n = 0;
-  for (const it of S.items.filter(i => i.editable && visible(i))) {
+  for (const it of S.items.filter(i => i.editable && !i.removed && visible(i))) {
     const v = it.name.replace(re, $('replace').value).replace(/\s+/g, ' ').trim();
     if (v && v !== it.name) { it.name = v; n++; }
   }
