@@ -39,6 +39,10 @@ Bovenaan kies je de **HomeKit-bridge** van Home Assistant (integratie *HomeKit B
 - met ✓ en blauw: de bridge toont deze entiteit in Apple Woning;
 - zonder vinkje: niet zichtbaar.
 
+Met **Alleen HomeKit** (standaard aan) zie je alleen de entiteiten die deze bridge toont. Andere entiteiten haal je erbij met **+ Entiteit**: kies ze, kies een ruimte en sla op. Bij *Home Assistant* als bron verandert dat het gebied van de entiteit; met *Zichtbaar maken in HomeKit* komt ze ook in de bridge.
+
+De add-on leest de bridges uit de configuratie van Home Assistant (`.storage/core.config_entries`, alleen lezen).
+
 Tik op de knop om dat te wijzigen. *Opslaan* past de filter van de bridge aan, via dezelfde opties als in Instellingen → Apparaten & diensten → HomeKit Bridge → Configureren. De bridge herstart daarna vanzelf.
 
 - Zit een heel domein in de bridge (bijvoorbeeld "alle schakelaars") en verberg je één entiteit, dan zet de add-on de andere entiteiten van dat domein apart in de lijst. Wat zichtbaar was, blijft zichtbaar.

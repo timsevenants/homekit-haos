@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,9 @@ STATIC = Path(__file__).parent / "static"
 PORT = int(os.environ.get("PORT", "8099"))
 KEEP_VERSIONS = 200
 INGRESS_IP = "172.30.32.2"
+# Home Assistant's own config folder (read-only): the HomeKit Bridge filters are read from .storage there.
+RECENT_WRITES = {}  # entry_id -> (time, domains, entities) of the last filter this add-on saved
+CONFIG_DIRS = [Path(p) for p in (os.environ.get("HA_CONFIG_DIR"), "/homeassistant", "/config") if p]
 
 IN_ADDON = bool(os.environ.get("SUPERVISOR_TOKEN"))
 if IN_ADDON:
@@ -481,13 +485,56 @@ def form_options(step, name) -> list:
     return list(opts) if isinstance(opts, dict) else [o[0] if isinstance(o, list) else o for o in opts]
 
 
+def stored_entries():
+    """HomeKit config entries from .storage/core.config_entries, or None when that file cannot be read."""
+    for d in CONFIG_DIRS:
+        try:
+            data = read_json(d / ".storage" / "core.config_entries")
+        except (OSError, ValueError):
+            continue
+        return [e for e in data.get("data", {}).get("entries", []) if e.get("domain") == "homekit"]
+    return None
+
+
+def bridge_from_entry(entry) -> dict:
+    """Same shape as the options flow shows it: domains = include_domains + domains of listed entities."""
+    opts = entry.get("options") or {}
+    f = opts.get("filter") or {}
+    inc_e, exc_e = list(f.get("include_entities") or []), list(f.get("exclude_entities") or [])
+    mode = opts.get("mode") or entry.get("data", {}).get("mode") or "bridge"
+    iem = "include" if inc_e else "exclude"
+    domains = set(f.get("include_domains") or []) | {e.split(".")[0] for e in inc_e}
+    b = {"entry_id": entry["entry_id"], "title": entry.get("title") or entry["entry_id"], "state": None,
+         "editable": False, "reason": None, "mode": mode, "include_exclude_mode": iem,
+         "domains": sorted(domains), "entities": sorted(inc_e if iem == "include" else exc_e),
+         "supported_domains": [], "source": "storage"}
+    if entry.get("disabled_by"):
+        b["reason"] = "uitgeschakeld"
+    elif entry.get("source") == "import":
+        b["reason"] = "beheerd via YAML"
+    elif mode != "bridge":
+        b["reason"] = "accessoire-modus (één entiteit)"
+    else:
+        b["editable"] = True
+    return b
+
+
 async def read_bridges(ha: HomeAssistant) -> list:
-    """Reads each HomeKit entry's filter by opening its options flow and closing it without saving."""
+    """Each HomeKit Bridge with its filter. First from .storage (read-only map of the config folder);
+    otherwise through the options flow, which is opened and closed without saving."""
+    stored = stored_entries()
+    if stored is not None:
+        bridges = [bridge_from_entry(e) for e in stored]
+        for b in bridges:  # Home Assistant writes .storage with a delay: use what we just saved
+            w = RECENT_WRITES.get(b["entry_id"])
+            if w and time.monotonic() - w[0] < 30:
+                b["domains"], b["entities"] = w[1], w[2]
+        return bridges
     bridges = []
     for entry in await ha.cmd({"type": "config_entries/get", "domain": "homekit"}):
         b = {"entry_id": entry["entry_id"], "title": entry.get("title"), "state": entry.get("state"),
              "editable": False, "reason": None, "mode": None, "include_exclude_mode": None,
-             "domains": [], "entities": [], "supported_domains": []}
+             "domains": [], "entities": [], "supported_domains": [], "source": "options_flow"}
         bridges.append(b)
         if entry.get("disabled_by"):
             b["reason"] = "uitgeschakeld"
@@ -609,6 +656,7 @@ async def write_bridge(ha: HomeAssistant, bridge, domains, entities):
         if step.get("type") != "create_entry":
             raise HAError(f"HomeKit-opties niet bewaard: {step.get('type')} {step.get('reason') or ''}")
         fid = None
+        RECENT_WRITES[bridge["entry_id"]] = (time.monotonic(), sorted(domains), sorted(entities))
     finally:
         if fid:
             try:

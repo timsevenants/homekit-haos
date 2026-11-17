@@ -14,7 +14,7 @@ The add-on manages JSON exports of the HomeKit Rooms iOS app (format `homekit-ro
 ## Recommended flow
 
 1. `GET /api/files`: pick a file. Each file has `path`, `kind`, `home`, counts and number of `versions`.
-2. `GET /api/homekit`: list the bridges. `exposed` maps each `entity_id` to `"entity"` (listed explicitly) or `"domain"` (its whole domain is included).
+2. `GET /api/homekit`: list the bridges (read from Home Assistant's `.storage/core.config_entries`, read-only; a bridge with `mode: null` could not be read, see `reason`). `exposed` maps each `entity_id` to `"entity"` (listed explicitly) or `"domain"` (its whole domain is included).
 3. `POST /api/agent` with `"dry_run": true` (the default). Read `file.changes`, `homekit.changes` and `warnings`.
 4. Repeat with `"dry_run": false` and a short `"note"` to apply. The previous file content is saved as a version first. The bridge reloads automatically.
 5. Tell the user to open the file in the iOS app (*Importeren uit JSON*). Only that step changes Apple Home: names, rooms, scenes and automations. The add-on only changes the file and which entities the bridge exposes.

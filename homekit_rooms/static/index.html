@@ -85,7 +85,7 @@ ul.items li.added { background: var(--new); }
   <span class="spacer"></span>
   <input id="search" type="search" placeholder="Zoeken…">
   <button id="addRoom">+ Ruimte</button>
-  <button id="addEntity" title="Entiteiten uit Home Assistant toevoegen aan dit bestand">+ Entiteit</button>
+  <button id="addEntity" title="Entiteiten uit Home Assistant toevoegen of aan een ruimte toewijzen">+ Entiteit</button>
   <button id="save" class="primary" disabled>Opslaan</button>
 </header>
 <div class="tools">
@@ -95,6 +95,7 @@ ul.items li.added { background: var(--new); }
   <span class="spacer"></span>
   <label id="haSyncLabel" title="Namen en ruimtes ook aanpassen bij entiteiten waarvan het serienummer een entity_id is"><input type="checkbox" id="haSync"> Ook in Home Assistant</label>
   <select id="bridge" aria-label="HomeKit-bridge" title="Welke HomeKit-bridge van Home Assistant"></select>
+  <label id="onlyHkLabel" title="Alleen wat de gekozen HomeKit-bridge toont (en wat je zelf toevoegt)"><input type="checkbox" id="onlyHk" checked> Alleen HomeKit</label>
   <label id="allLabel"><input type="checkbox" id="allDomains"> Alle entiteiten</label>
 </div>
 <p id="msg"></p>
@@ -112,7 +113,7 @@ ul.items li.added { background: var(--new); }
 </dialog>
 
 <dialog id="addDlg">
-  <h3>Entiteiten toevoegen</h3>
+  <h3 id="addTitle">Entiteiten toevoegen</h3>
   <div class="row">
     <input id="addSearch" type="search" placeholder="Zoek op naam, entity_id of gebied">
     <label><input type="checkbox" id="addAll"> Alle domeinen</label>
@@ -188,15 +189,15 @@ async function loadHomeKit() {
   } catch (e) {
     HK = { bridges: [], error: e.message };
   }
-  const opts = HK.bridges.filter(b => b.mode);
+  const opts = HK.bridges;
   $('bridge').innerHTML = opts.length
-    ? opts.map(b => `<option value="${esc(b.entry_id)}">HomeKit: ${esc(b.title)} (${Object.keys(b.exposed).length} zichtbaar${b.editable ? '' : ', alleen lezen'})</option>`).join('')
+    ? opts.map(b => `<option value="${esc(b.entry_id)}">HomeKit: ${esc(b.title)} (${b.mode ? Object.keys(b.exposed).length + ' zichtbaar' : 'niet gelezen'}${b.editable ? '' : ', alleen lezen' + (b.reason ? ': ' + esc(b.reason) : '')})</option>`).join('')
     : `<option value="">HomeKit-bridge: ${HK.error ? 'niet bereikbaar' : 'geen gevonden'}</option>`;
-  const pick = opts.find(b => b.entry_id === keep) || opts.find(b => b.editable) || opts[0];
+  const pick = opts.find(b => b.entry_id === keep) || opts.find(b => b.editable) || opts.find(b => b.mode) || opts[0];
   if (pick) $('bridge').value = pick.entry_id;
 }
 
-const bridge = () => HK?.bridges.find(b => b.entry_id === $('bridge').value) || null;
+const bridge = () => HK?.bridges.find(b => b.entry_id === $('bridge').value && b.mode) || null;
 const exposedHow = eid => bridge()?.exposed[eid] || null;
 
 function fixedRoom() { return { id: NONE, name: 'Zonder ruimte', orig: 'Zonder ruimte', fixed: true }; }
@@ -245,7 +246,9 @@ async function load() {
     say((S.kind === 'ha'
       ? 'Sleep entiteiten naar een andere ruimte, tik op ✎ om een naam te wijzigen en op HomeKit om ze te tonen of te verbergen in Apple Woning.'
       : `Sleep accessoires naar een andere ruimte en ruimtes (⠿) in de gewenste volgorde. Opslaan schrijft ${S.path} en bewaart eerst een versie.`)
-      + (HK?.error ? `\nHomeKit-bridge niet gelezen: ${HK.error}` : ''));
+      + (HK?.error ? `\nHomeKit-bridge niet gelezen: ${HK.error}` : '')
+      + (HK && !HK.error && !HK.bridges.length ? '\nGeen HomeKit Bridge gevonden in Home Assistant.' : '')
+      + (HK ? HK.bridges.filter(b => !b.mode && b.reason).map(b => `\n${b.title}: ${b.reason}`).join('') : ''));
   } catch (e) {
     S = null;
     say('Laden mislukt: ' + e.message, true);
@@ -253,7 +256,11 @@ async function load() {
   render();
 }
 
-const visible = it => (S.kind !== 'ha' || $('allDomains').checked || (it.listed && DOMAINS.includes(it.domain))) &&
+/** "Alleen HomeKit": only what the bridge shows, plus what was added or assigned in this session. */
+const onlyHk = () => $('onlyHk').checked && !!bridge();
+const inHkView = it => !it.entity_id || it.expose || it.origExpose || it.isNew || it.pinned;
+const visible = it => (onlyHk() ? inHkView(it)
+    : S.kind !== 'ha' || $('allDomains').checked || (it.listed && DOMAINS.includes(it.domain))) &&
   (!$('search').value || norm(it.name + ' ' + it.sub).includes(norm($('search').value)));
 const roomById = id => S.rooms.find(r => r.id === id) || S.removed.find(r => r.id === id);
 const itemChanged = it => it.name !== it.orig || it.room !== it.origRoom;
@@ -272,9 +279,10 @@ function render() {
   $('board').innerHTML = '';
   const file = S?.kind === 'file';
   $('haSyncLabel').style.display = file ? '' : 'none';
-  $('allLabel').style.display = S?.kind === 'ha' ? '' : 'none';
+  $('onlyHkLabel').style.display = bridge() ? '' : 'none';
+  $('allLabel').style.display = S?.kind === 'ha' && !onlyHk() ? '' : 'none';
   $('addRoom').disabled = !S;
-  $('addEntity').style.display = file ? '' : 'none';
+  $('addEntity').style.display = S ? '' : 'none';
   $('exportBtn').disabled = !file;
   $('versionsBtn').disabled = !file;
   if (!S) { updateSave(); return; }
@@ -605,8 +613,11 @@ async function openAdd() {
   addPicked = new Set();
   $('addSearch').value = '';
   $('addList').innerHTML = '<label>Laden…</label>';
+  const ha = S.kind === 'ha';
+  $('addTitle').textContent = ha ? 'Entiteiten aan een ruimte toewijzen' : 'Entiteiten toevoegen';
   $('addRoomSel').innerHTML = '<option value="__area__">Gebied uit Home Assistant</option>' +
     S.rooms.map(r => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('');
+  if (ha) $('addRoomSel').value = S.rooms.find(r => !r.fixed)?.id || '__area__';
   $('addExpose').disabled = !bridge()?.editable;
   $('addExpose').checked = !!bridge()?.editable;
   $('addDlg').showModal();
@@ -615,13 +626,14 @@ async function openAdd() {
 
 function renderAdd() {
   if (!HA_CACHE) return;
-  const inFile = new Set(S.items.filter(i => i.entity_id && !i.removed).map(i => i.entity_id));
+  // A file: entities not in it yet. Home Assistant: entities not on the board right now (e.g. not in HomeKit).
+  const inFile = new Set(S.items.filter(i => i.entity_id && !i.removed && (S.kind === 'file' || visible(i))).map(i => i.entity_id));
   const q = norm($('addSearch').value);
   const list = HA_CACHE.entities
     .filter(e => !inFile.has(e.entity_id))
     .filter(e => $('addAll').checked || (e.listed && DOMAINS.includes(e.domain)))
     .filter(e => !q || norm(`${e.name} ${e.entity_id} ${e.area || ''}`).includes(q))
-    .sort((a, b) => (a.area || '~').localeCompare(b.area || '~') || a.name.localeCompare(b.name))
+    .sort((a, b) => !!exposedHow(a.entity_id) - !!exposedHow(b.entity_id) || (a.area || '~').localeCompare(b.area || '~') || a.name.localeCompare(b.name))
     .slice(0, 300);
   $('addList').innerHTML = list.length ? list.map(e => {
     const how = exposedHow(e.entity_id);
@@ -639,6 +651,15 @@ function addEntities() {
   for (const eid of addPicked) {
     const e = HA_CACHE.entities.find(x => x.entity_id === eid);
     if (!e) continue;
+    if (S.kind === 'ha') {
+      // Already on the board but hidden by the filter: pin it, move it, optionally expose it.
+      const it = S.items.find(i => i.entity_id === eid);
+      if (!it) continue;
+      it.pinned = true;
+      if (target !== '__area__') it.room = target;
+      if ($('addExpose').checked && bridge()?.editable) it.expose = true;
+      continue;
+    }
     let room = target;
     if (target === '__area__') {
       room = NONE;
@@ -657,11 +678,12 @@ function addEntities() {
     S.items.push(it);
   }
   $('addDlg').close();
-  say(`${addPicked.size} entiteiten toegevoegd (nog niet opgeslagen). Na opslaan importeer je het bestand in de iOS-app.`);
+  say(S.kind === 'ha' ? `${addPicked.size} entiteiten toegewezen (nog niet opgeslagen).`
+    : `${addPicked.size} entiteiten toegevoegd (nog niet opgeslagen). Na opslaan importeer je het bestand in de iOS-app.`);
   render();
 }
 
-$('addEntity').addEventListener('click', () => { if (S?.kind === 'file') openAdd(); });
+$('addEntity').addEventListener('click', () => { if (S) openAdd(); });
 $('addSearch').addEventListener('input', renderAdd);
 $('addAll').addEventListener('change', renderAdd);
 $('addOk').addEventListener('click', addEntities);
@@ -677,6 +699,7 @@ $('bridge').addEventListener('change', () => {
 $('reload').addEventListener('click', async () => { HA_CACHE = null; await loadSources($('source').value); await load(); });
 $('search').addEventListener('input', render);
 $('allDomains').addEventListener('change', render);
+$('onlyHk').addEventListener('change', render);
 $('addRoom').addEventListener('click', () => {
   const r = { id: 'new' + (++newRooms), name: 'Nieuwe ruimte ' + newRooms, orig: null, isNew: true };
   S.rooms.push(r);

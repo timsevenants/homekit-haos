@@ -1,5 +1,5 @@
 name: HomeKit Rooms
-version: "0.3.0"
+version: "0.4.0"
 slug: homekit_rooms
 description: JSON van de HomeKit Rooms-app beheren (sorteren, hernoemen, versies) en kiezen wat de HomeKit Bridge toont
 url: https://github.com/timsevenants/homekit-haos
@@ -16,6 +16,8 @@ homeassistant_api: true
 map:
   - type: share
     read_only: false
+  - type: homeassistant_config
+    read_only: true
 ports:
   8099/tcp: null
 ports_description:
