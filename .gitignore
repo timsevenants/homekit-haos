@@ -10,3 +10,5 @@
 *.env
 secrets.yaml
 backups/
+__pycache__/
+*.pyc
